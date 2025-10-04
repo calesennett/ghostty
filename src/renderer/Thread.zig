@@ -108,6 +108,11 @@ flags: packed struct {
     /// This is true when the view is focused. This defaults to true
     /// and it is up to the apprt to set the correct value.
     focused: bool = true,
+
+    /// When set, perform a single draw even if the surface is currently not
+    /// visible. This lets hidden surfaces refresh their back buffers (for
+    /// example after a theme change) before they are shown again.
+    force_hidden_draw: bool = false,
 } = .{},
 
 pub const DerivedConfig = struct {
@@ -460,6 +465,11 @@ fn drainMailbox(self: *Thread) !void {
                 try self.changeConfig(config.thread);
                 try self.renderer.changeConfig(config.impl);
 
+                // Hidden surfaces still need a fresh frame so that by the
+                // time they are shown the updated configuration (e.g. theme)
+                // is already rendered.
+                if (!self.flags.visible) self.flags.force_hidden_draw = true;
+
                 // Stop and start the draw timer to capture the new
                 // hasAnimations value.
                 self.stopDrawTimer();
@@ -484,12 +494,16 @@ fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
 /// Trigger a draw. This will not update frame data or anything, it will
 /// just trigger a draw/paint.
 fn drawFrame(self: *Thread, now: bool) void {
-    // If we're invisible, we do not draw.
-    if (!self.flags.visible) return;
+    const force_hidden = self.flags.force_hidden_draw;
+
+    // Skip drawing when hidden unless we explicitly queued a forced draw.
+    if (!self.flags.visible and !force_hidden) return;
+
+    const immediate = now or force_hidden;
 
     // If the renderer is managing a vsync on its own, we only draw
-    // when we're forced to via `now`.
-    if (!now and self.renderer.hasVsync()) return;
+    // when we're forced to via `now` or a forced hidden draw.
+    if (!immediate and self.renderer.hasVsync()) return;
 
     if (must_draw_from_app_thread) {
         _ = self.app_mailbox.push(
@@ -500,6 +514,8 @@ fn drawFrame(self: *Thread, now: bool) void {
         self.renderer.drawFrame(false) catch |err|
             log.warn("error drawing err={}", .{err});
     }
+
+    if (force_hidden) self.flags.force_hidden_draw = false;
 }
 
 fn wakeupCallback(
